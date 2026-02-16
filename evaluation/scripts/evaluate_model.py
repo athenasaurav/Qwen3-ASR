@@ -315,6 +315,12 @@ def main():
             )
             prediction = transcription[0].text
 
+            # Print per-sample details for manual inspection
+            audio_path = audio_data.get("path", f"sample-{i}")
+            tqdm.write(f"  [{i}] File: {audio_path}")
+            tqdm.write(f"       REF: {ground_truth}")
+            tqdm.write(f"       HYP: {prediction}")
+
             # Normalize for metric computation
             gt_norm = normalize_text(ground_truth, args.language)
             pred_norm = normalize_text(prediction, args.language)
