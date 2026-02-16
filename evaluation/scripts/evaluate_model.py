@@ -7,7 +7,7 @@ loads credentials from .env, and auto-selects CER for CJK languages.
 
 Usage examples:
 
-  # Base model on LibriSpeech
+  # Base model on LibriSpeech (forced English)
   python evaluate_model.py \\
     --model_path Qwen/Qwen3-ASR-1.7B \\
     --dataset_name librispeech \\
@@ -27,13 +27,22 @@ Usage examples:
     --language en_us \\
     --max_samples 10
 
-  # Ad-hoc dataset (no .md file needed)
+  # Ad-hoc dataset with forced language
   python evaluate_model.py \\
     --model_path Qwen/Qwen3-ASR-1.7B \\
     --hf_path ArabicSpeech/sawtarabi \\
     --text_column text_not_diacritized \\
     --audio_column audio \\
     --language ar \\
+    --max_samples 10
+
+  # Auto-detect mode on mixed-language dataset
+  python evaluate_model.py \\
+    --model_path Qwen/Qwen3-ASR-1.7B \\
+    --hf_path ArabicSpeech/sawtarabi \\
+    --text_column text_not_diacritized \\
+    --audio_column audio \\
+    --language_column dialect \\
     --max_samples 10
 """
 
@@ -43,6 +52,7 @@ import os
 import platform
 import sys
 import time
+from collections import defaultdict
 from datetime import datetime
 
 import torch
@@ -86,8 +96,16 @@ def parse_args():
              "Not needed if --hf_path is provided.",
     )
     p.add_argument(
-        "--language", type=str, required=True,
-        help="Language code for dataset loading (e.g. en, zh-CN, ja, en_us).",
+        "--language", type=str, default=None,
+        help="Language code (e.g. en, zh-CN, ja, en_us). When provided, forces "
+             "the model to transcribe in this language. When omitted, the model "
+             "auto-detects language per sample (useful for mixed-language datasets).",
+    )
+    p.add_argument(
+        "--language_column", type=str, default=None,
+        help="Dataset column containing ground truth language labels per sample "
+             "(e.g. 'dialect'). Used to evaluate language detection accuracy in "
+             "auto-detect mode.",
     )
     p.add_argument(
         "--split", type=str, default=None,
@@ -196,6 +214,40 @@ def load_model(model_path, adapter_path, device, dtype_str):
     )
 
 
+def compute_per_language_scores(results):
+    """
+    Group results by detected language and compute WER/CER per group.
+
+    Returns dict: {language: {"metric": "WER"|"CER", "score": float, "count": int}}
+    """
+    # Group by detected language
+    by_lang = defaultdict(lambda: {"refs": [], "hyps": []})
+    for r in results:
+        lang = r["detected_language"]
+        by_lang[lang]["refs"].append(r["ground_truth_normalized"])
+        by_lang[lang]["hyps"].append(r["prediction_normalized"])
+
+    scores = {}
+    for lang, data in sorted(by_lang.items()):
+        refs = data["refs"]
+        hyps = data["hyps"]
+        if not refs:
+            continue
+        use_cer_for_lang = is_cjk_language(lang)
+        metric_fn = cer if use_cer_for_lang else wer
+        metric_name = "CER" if use_cer_for_lang else "WER"
+        try:
+            score = metric_fn(refs, hyps)
+        except Exception:
+            score = None
+        scores[lang] = {
+            "metric": metric_name,
+            "score": round(score, 4) if score is not None else None,
+            "count": len(refs),
+        }
+    return scores
+
+
 def generate_report(metadata, num_samples, num_errors):
     """Generate a human-readable markdown evaluation report."""
     score = metadata["score"]
@@ -203,8 +255,10 @@ def generate_report(metadata, num_samples, num_errors):
     score_str = f"{score:.4f}" if score is not None else "N/A"
 
     adapter_str = metadata["adapter_path"] or "None (base / full-finetune)"
+    lang_str = metadata.get("language") or "auto-detect"
+    lang_canonical_str = metadata.get("language_canonical") or "auto-detect"
 
-    return f"""# Evaluation Report
+    report = f"""# Evaluation Report
 
 ## Configuration
 | Parameter | Value |
@@ -212,7 +266,7 @@ def generate_report(metadata, num_samples, num_errors):
 | Model | `{metadata['model_path']}` |
 | Adapter | `{adapter_str}` |
 | Dataset | `{metadata['dataset_hf_path']}` |
-| Language | `{metadata['language']}` ({metadata['language_canonical']}) |
+| Language | `{lang_str}` ({lang_canonical_str}) |
 | Split | `{metadata['split']}` |
 | Samples | {num_samples} |
 | Errors | {num_errors} |
@@ -220,8 +274,20 @@ def generate_report(metadata, num_samples, num_errors):
 ## Results
 | Metric | Score |
 |--------|-------|
-| {metric} | **{score_str}** |
+| {metric} (overall) | **{score_str}** |
+"""
 
+    # Per-language breakdown (auto-detect mode)
+    per_lang = metadata.get("per_language_scores")
+    if per_lang:
+        report += "\n## Per-Language Breakdown\n"
+        report += "| Language | Metric | Score | Samples |\n"
+        report += "|----------|--------|-------|---------|\n"
+        for lang, info in sorted(per_lang.items()):
+            lang_score = f"{info['score']:.4f}" if info['score'] is not None else "N/A"
+            report += f"| {lang} | {info['metric']} | {lang_score} | {info['count']} |\n"
+
+    report += f"""
 ## Language Detection
 | Detail | Value |
 |--------|-------|
@@ -238,6 +304,7 @@ def generate_report(metadata, num_samples, num_errors):
 | Platform | {metadata['platform']} |
 | Timestamp | {metadata['timestamp']} |
 """
+    return report
 
 
 def main():
@@ -253,6 +320,9 @@ def main():
     if not args.dataset_name and not args.hf_path:
         print("ERROR: Provide either --dataset_name (for .md config) or --hf_path (for ad-hoc dataset).")
         sys.exit(1)
+
+    # Determine mode: force language vs auto-detect
+    auto_detect = args.language is None
 
     # Resolve HF token: CLI arg > .env > environment
     hf_token = args.hf_token or os.environ.get("HF_TOKEN")
@@ -287,13 +357,17 @@ def main():
               f"(text_column={dataset_config.text_column}, "
               f"audio_column={dataset_config.audio_column})")
 
-    # Resolve language name for Qwen3-ASR
-    lang_canonical = resolve_language_name(args.language)
-
-    # Auto-select metric: CER for CJK, WER for others
-    use_cer = is_cjk_language(args.language)
-    metric_name = "CER" if use_cer else "WER"
-    print(f"Language: {args.language} -> {lang_canonical} (metric: {metric_name})")
+    # Language and metric setup
+    if auto_detect:
+        lang_canonical = None
+        metric_name = "WER"  # overall metric for auto-detect; per-language uses appropriate metric
+        print("Language: auto-detect (model will detect per sample)")
+        print(f"Overall metric: {metric_name} (per-language breakdown will use CER for CJK)")
+    else:
+        lang_canonical = resolve_language_name(args.language)
+        use_cer = is_cjk_language(args.language)
+        metric_name = "CER" if use_cer else "WER"
+        print(f"Language: {args.language} -> {lang_canonical} (metric: {metric_name})")
 
     # Check if gated dataset needs token
     if dataset_config.is_gated and not hf_token:
@@ -311,22 +385,28 @@ def main():
 
     # Load dataset
     split = args.split or dataset_config.split
-    print(f"Loading dataset {dataset_config.hf_path} [{args.language}] split={split}...")
+    lang_label = args.language or "autodetect"
+    print(f"Loading dataset {dataset_config.hf_path} [{lang_label}] split={split}...")
 
     ds_kwargs = {"split": split}
     if hf_token:
         ds_kwargs["token"] = hf_token
 
-    # Resolve HF config/subset name:
-    #   - hf_config set in .md  -> use it (supports {language} placeholder)
-    #   - hf_config not set     -> try language as config, fallback to no config
+    # Resolve HF config/subset name
     if dataset_config.hf_config is not None:
-        config_name = (
-            dataset_config.hf_config.format(language=args.language)
-            if dataset_config.hf_config else None
-        )
+        if "{language}" in (dataset_config.hf_config or ""):
+            if auto_detect:
+                print("ERROR: This dataset config uses {language} placeholder in hf_config, "
+                      "but --language was not provided. Either pass --language or use "
+                      "--hf_config to specify the subset directly.")
+                sys.exit(1)
+            config_name = dataset_config.hf_config.format(language=args.language)
+        else:
+            # Literal config name (e.g. "clean") or empty string
+            config_name = dataset_config.hf_config if dataset_config.hf_config else None
     else:
-        config_name = args.language
+        # No hf_config set: try language as config if provided, otherwise no config
+        config_name = args.language  # None in auto-detect mode
 
     if config_name:
         try:
@@ -356,32 +436,41 @@ def main():
     else:
         out_dir = os.path.join(
             project_root, "evaluation", "results", model_short,
-            f"{dataset_label}_{args.language}_{timestamp}",
+            f"{dataset_label}_{lang_label}_{timestamp}",
         )
     os.makedirs(out_dir, exist_ok=True)
 
     # Run evaluation
     text_col = dataset_config.text_column
     audio_col = dataset_config.audio_column
+    lang_col = args.language_column  # may be None
 
     results = []
     ground_truths = []
     predictions = []
     detected_languages = []
+    gt_languages = []
     errors = []
     start_time = time.time()
 
-    for i, item in enumerate(tqdm(dataset, desc=f"Evaluating ({metric_name})")):
+    tqdm_desc = "Evaluating (auto-detect)" if auto_detect else f"Evaluating ({metric_name})"
+
+    for i, item in enumerate(tqdm(dataset, desc=tqdm_desc)):
         try:
             audio_data = item[audio_col]
             audio_array = audio_data["array"]
             sampling_rate = audio_data["sampling_rate"]
             ground_truth = item[text_col]
 
-            # Transcribe
+            # Read ground truth language from dataset column if available
+            gt_lang = item.get(lang_col) if lang_col else None
+            if gt_lang is not None:
+                gt_languages.append(str(gt_lang))
+
+            # Transcribe: force language or let model auto-detect
             transcription = model.transcribe(
                 audio=(audio_array, sampling_rate),
-                language=lang_canonical,
+                language=lang_canonical,  # None in auto-detect mode
             )
             prediction = transcription[0].text
             detected_lang = getattr(transcription[0], "language", None) or "N/A"
@@ -389,38 +478,48 @@ def main():
 
             # Print per-sample details for manual inspection
             audio_path = audio_data.get("path", f"sample-{i}")
+            gt_lang_str = f" (GT: {gt_lang})" if gt_lang is not None else ""
             tqdm.write(f"  [{i}] File: {audio_path}")
             tqdm.write(f"       REF: {ground_truth}")
             tqdm.write(f"       HYP: {prediction}")
-            tqdm.write(f"       LANG: {detected_lang}")
+            tqdm.write(f"       LANG: {detected_lang}{gt_lang_str}")
 
             # Normalize for metric computation
-            gt_norm = normalize_text(ground_truth, args.language)
-            pred_norm = normalize_text(prediction, args.language)
+            # In auto-detect mode, use the detected language for normalization
+            norm_lang = detected_lang if auto_detect else args.language
+            gt_norm = normalize_text(ground_truth, norm_lang)
+            pred_norm = normalize_text(prediction, norm_lang)
 
             ground_truths.append(gt_norm)
             predictions.append(pred_norm)
 
-            results.append({
+            result_entry = {
                 "id": i,
                 "ground_truth": ground_truth,
                 "ground_truth_normalized": gt_norm,
                 "prediction": prediction,
                 "prediction_normalized": pred_norm,
                 "detected_language": detected_lang,
-            })
+            }
+            if gt_lang is not None:
+                result_entry["ground_truth_language"] = str(gt_lang)
+            results.append(result_entry)
         except Exception as e:
             errors.append({"id": i, "error": str(e)})
 
     elapsed = time.time() - start_time
 
-    # Compute metrics
+    # Compute overall metric
     score = None
     if ground_truths and predictions:
-        if use_cer:
-            score = cer(ground_truths, predictions)
-        else:
+        if auto_detect:
+            # Overall WER for mixed-language (universal metric)
             score = wer(ground_truths, predictions)
+        else:
+            score = cer(ground_truths, predictions) if metric_name == "CER" else wer(ground_truths, predictions)
+
+    # Per-language breakdown (always computed, most useful in auto-detect mode)
+    per_lang_scores = compute_per_language_scores(results) if results else {}
 
     # Build metadata
     gpu_name = "N/A"
@@ -434,10 +533,23 @@ def main():
     lang_counts = {}
     for dl in detected_languages:
         lang_counts[dl] = lang_counts.get(dl, 0) + 1
+
     lang_accuracy = None
-    if detected_languages:
+    if auto_detect and gt_languages and detected_languages:
+        # Compare detected language vs ground truth labels from dataset
+        # Note: dataset labels (e.g. "MSA", "EGY") may not directly match
+        # model output names (e.g. "Arabic", "English"), so we store raw comparison
+        matches = 0
+        for det, gt in zip(detected_languages, gt_languages):
+            if det.lower() == gt.lower():
+                matches += 1
+        lang_accuracy = round(matches / len(gt_languages), 4)
+    elif not auto_detect and detected_languages:
+        # Force mode: compare detected vs forced language
         matches = sum(1 for dl in detected_languages if dl.lower() == lang_canonical.lower())
         lang_accuracy = round(matches / len(detected_languages), 4)
+
+    expected_lang = lang_canonical if not auto_detect else "auto-detect"
 
     metadata = {
         "model_path": args.model_path,
@@ -446,13 +558,16 @@ def main():
         "dataset_hf_path": dataset_config.hf_path,
         "language": args.language,
         "language_canonical": lang_canonical,
+        "auto_detect": auto_detect,
+        "language_column": lang_col,
         "split": split,
         "num_samples": len(results),
         "num_errors": len(errors),
         "metric": metric_name,
-        "score": score,
+        "score": round(score, 4) if score is not None else None,
+        "per_language_scores": per_lang_scores,
         "language_detection": {
-            "expected": lang_canonical,
+            "expected": expected_lang,
             "accuracy": lang_accuracy,
             "distribution": lang_counts,
         },
@@ -482,10 +597,20 @@ def main():
 
     # Print summary
     score_str = f"{score:.4f}" if score is not None else "N/A"
-    lang_acc_str = f"{lang_accuracy:.1%}" if lang_accuracy is not None else "N/A"
     print(f"\nEvaluation complete.")
-    print(f"  {metric_name}: {score_str}")
-    print(f"  Lang detection accuracy: {lang_acc_str} (expected: {lang_canonical})")
+    print(f"  {metric_name} (overall): {score_str}")
+
+    if per_lang_scores:
+        print(f"  Per-language breakdown:")
+        for lang, info in sorted(per_lang_scores.items()):
+            lang_score = f"{info['score']:.4f}" if info['score'] is not None else "N/A"
+            print(f"    {lang}: {info['metric']}={lang_score} ({info['count']} samples)")
+
+    if lang_accuracy is not None:
+        if auto_detect and lang_col:
+            print(f"  Lang detection accuracy: {lang_accuracy:.1%} (vs '{lang_col}' column)")
+        else:
+            print(f"  Lang detection accuracy: {lang_accuracy:.1%} (expected: {lang_canonical})")
     print(f"  Lang distribution: {lang_counts}")
     print(f"  Samples: {len(results)} | Errors: {len(errors)}")
     print(f"  Time: {elapsed:.1f}s")
