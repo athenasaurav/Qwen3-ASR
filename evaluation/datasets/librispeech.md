@@ -8,6 +8,7 @@
   "split": "test.clean",
   "sampling_rate": 16000,
   "is_gated": false,
+  "hf_config": "clean",
   "languages": ["en"]
 }
 ```

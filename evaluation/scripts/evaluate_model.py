@@ -250,12 +250,23 @@ def main():
     if hf_token:
         ds_kwargs["token"] = hf_token
 
-    # Some datasets use language as config name, others don't
-    # LibriSpeech has no language config; Common Voice and FLEURS do
-    try:
-        dataset = load_dataset(dataset_config.hf_path, args.language, **ds_kwargs)
-    except Exception:
-        # Fallback: try loading without language as config name
+    # Resolve HF config/subset name:
+    #   - hf_config set in .md  -> use it (supports {language} placeholder)
+    #   - hf_config not set     -> try language as config, fallback to no config
+    if dataset_config.hf_config is not None:
+        config_name = (
+            dataset_config.hf_config.format(language=args.language)
+            if dataset_config.hf_config else None
+        )
+    else:
+        config_name = args.language
+
+    if config_name:
+        try:
+            dataset = load_dataset(dataset_config.hf_path, config_name, **ds_kwargs)
+        except Exception:
+            dataset = load_dataset(dataset_config.hf_path, **ds_kwargs)
+    else:
         dataset = load_dataset(dataset_config.hf_path, **ds_kwargs)
 
     if args.max_samples:

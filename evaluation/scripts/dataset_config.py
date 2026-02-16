@@ -26,6 +26,7 @@ class DatasetConfig:
     is_gated: bool
     languages: list = field(default_factory=list)
     language_column: Optional[str] = None
+    hf_config: Optional[str] = None  # HF subset/config name; supports {language} placeholder
 
 
 # Languages where CER is more appropriate than WER
@@ -190,6 +191,7 @@ def load_dataset_config(dataset_name: str) -> DatasetConfig:
         is_gated=raw.get("is_gated", False),
         languages=raw.get("languages", []),
         language_column=raw.get("language_column"),
+        hf_config=raw.get("hf_config"),
     )
 
 

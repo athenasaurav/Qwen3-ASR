@@ -8,6 +8,7 @@
   "split": "test",
   "sampling_rate": 48000,
   "is_gated": true,
+  "hf_config": "{language}",
   "languages": ["en", "zh-CN", "de", "fr", "es", "pt", "id", "it", "ko", "ru", "th", "vi", "ja", "tr", "hi", "nl", "sv-SE", "da", "fi", "pl", "cs"]
 }
 ```

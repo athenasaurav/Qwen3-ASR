@@ -9,6 +9,7 @@
   "split": "[default evaluation split, e.g. test]",
   "sampling_rate": 16000,
   "is_gated": false,
+  "hf_config": "{language}",
   "languages": ["[lang_code_1]", "[lang_code_2]"]
 }
 ```
