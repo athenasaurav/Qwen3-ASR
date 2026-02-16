@@ -26,6 +26,15 @@ Usage examples:
     --dataset_name fleurs \\
     --language en_us \\
     --max_samples 10
+
+  # Ad-hoc dataset (no .md file needed)
+  python evaluate_model.py \\
+    --model_path Qwen/Qwen3-ASR-1.7B \\
+    --hf_path ArabicSpeech/sawtarabi \\
+    --text_column text_not_diacritized \\
+    --audio_column audio \\
+    --language ar \\
+    --max_samples 10
 """
 
 import argparse
@@ -45,6 +54,7 @@ from tqdm import tqdm
 # Add this script's directory to path for local imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from dataset_config import (
+    DatasetConfig,
     is_cjk_language,
     load_dataset_config,
     resolve_language_name,
@@ -68,11 +78,12 @@ def parse_args():
              "from --model_path and applies this adapter.",
     )
 
-    # Dataset
+    # Dataset — either use a pre-configured .md file or pass ad-hoc HF details
     p.add_argument(
-        "--dataset_name", type=str, required=True,
+        "--dataset_name", type=str, default=None,
         help="Dataset name matching a .md file in evaluation/datasets/ "
-             "(e.g. librispeech, common_voice, fleurs).",
+             "(e.g. librispeech, common_voice, fleurs). "
+             "Not needed if --hf_path is provided.",
     )
     p.add_argument(
         "--language", type=str, required=True,
@@ -81,7 +92,27 @@ def parse_args():
     p.add_argument(
         "--split", type=str, default=None,
         help="Override the default dataset split from config "
-             "(e.g. test.other for LibriSpeech).",
+             "(e.g. test.other for LibriSpeech). Default: test.",
+    )
+
+    # Ad-hoc dataset overrides (skip .md file entirely)
+    p.add_argument(
+        "--hf_path", type=str, default=None,
+        help="HuggingFace dataset path (e.g. ArabicSpeech/sawtarabi). "
+             "When provided, --dataset_name is not required.",
+    )
+    p.add_argument(
+        "--text_column", type=str, default="text",
+        help="Column name containing ground truth text (default: text).",
+    )
+    p.add_argument(
+        "--audio_column", type=str, default="audio",
+        help="Column name containing audio data (default: audio).",
+    )
+    p.add_argument(
+        "--hf_config", type=str, default=None,
+        help="HF dataset config/subset name. Supports {language} placeholder. "
+             "Example: 'clean' for LibriSpeech, or '{language}' for Common Voice.",
     )
 
     # Output
@@ -191,6 +222,13 @@ def generate_report(metadata, num_samples, num_errors):
 |--------|-------|
 | {metric} | **{score_str}** |
 
+## Language Detection
+| Detail | Value |
+|--------|-------|
+| Expected | {metadata.get('language_detection', {}).get('expected', 'N/A')} |
+| Accuracy | {metadata.get('language_detection', {}).get('accuracy', 'N/A')} |
+| Distribution | {metadata.get('language_detection', {}).get('distribution', {})} |
+
 ## Environment
 | Detail | Value |
 |--------|-------|
@@ -211,14 +249,43 @@ def main():
 
     args = parse_args()
 
+    # Validate: need either --dataset_name or --hf_path
+    if not args.dataset_name and not args.hf_path:
+        print("ERROR: Provide either --dataset_name (for .md config) or --hf_path (for ad-hoc dataset).")
+        sys.exit(1)
+
     # Resolve HF token: CLI arg > .env > environment
     hf_token = args.hf_token or os.environ.get("HF_TOKEN")
 
-    # Load dataset config from .md file
-    dataset_config = load_dataset_config(args.dataset_name)
-    print(f"Dataset config: {dataset_config.hf_path} "
-          f"(text_column={dataset_config.text_column}, "
-          f"audio_column={dataset_config.audio_column})")
+    # Build dataset config: from .md file or from CLI args
+    if args.hf_path:
+        # Ad-hoc mode: construct config from CLI flags
+        dataset_config = DatasetConfig(
+            name=args.hf_path.split("/")[-1],
+            hf_path=args.hf_path,
+            text_column=args.text_column,
+            audio_column=args.audio_column,
+            split=args.split or "test",
+            sampling_rate=16000,
+            is_gated=False,
+            hf_config=args.hf_config,
+        )
+        print(f"Ad-hoc dataset: {dataset_config.hf_path} "
+              f"(text_column={dataset_config.text_column}, "
+              f"audio_column={dataset_config.audio_column})")
+    else:
+        # Config mode: read from .md file
+        dataset_config = load_dataset_config(args.dataset_name)
+        # CLI overrides for columns if provided explicitly
+        if args.text_column != "text":
+            dataset_config.text_column = args.text_column
+        if args.audio_column != "audio":
+            dataset_config.audio_column = args.audio_column
+        if args.hf_config is not None:
+            dataset_config.hf_config = args.hf_config
+        print(f"Dataset config: {dataset_config.hf_path} "
+              f"(text_column={dataset_config.text_column}, "
+              f"audio_column={dataset_config.audio_column})")
 
     # Resolve language name for Qwen3-ASR
     lang_canonical = resolve_language_name(args.language)
@@ -282,12 +349,14 @@ def main():
         adapter_short = os.path.basename(args.adapter_path.rstrip("/"))
         model_short = f"{model_short}_adapter-{adapter_short}"
 
+    dataset_label = args.dataset_name or dataset_config.name
+
     if args.output_dir:
         out_dir = args.output_dir
     else:
         out_dir = os.path.join(
             project_root, "evaluation", "results", model_short,
-            f"{args.dataset_name}_{args.language}_{timestamp}",
+            f"{dataset_label}_{args.language}_{timestamp}",
         )
     os.makedirs(out_dir, exist_ok=True)
 
@@ -298,6 +367,7 @@ def main():
     results = []
     ground_truths = []
     predictions = []
+    detected_languages = []
     errors = []
     start_time = time.time()
 
@@ -314,12 +384,15 @@ def main():
                 language=lang_canonical,
             )
             prediction = transcription[0].text
+            detected_lang = getattr(transcription[0], "language", None) or "N/A"
+            detected_languages.append(detected_lang)
 
             # Print per-sample details for manual inspection
             audio_path = audio_data.get("path", f"sample-{i}")
             tqdm.write(f"  [{i}] File: {audio_path}")
             tqdm.write(f"       REF: {ground_truth}")
             tqdm.write(f"       HYP: {prediction}")
+            tqdm.write(f"       LANG: {detected_lang}")
 
             # Normalize for metric computation
             gt_norm = normalize_text(ground_truth, args.language)
@@ -334,6 +407,7 @@ def main():
                 "ground_truth_normalized": gt_norm,
                 "prediction": prediction,
                 "prediction_normalized": pred_norm,
+                "detected_language": detected_lang,
             })
         except Exception as e:
             errors.append({"id": i, "error": str(e)})
@@ -356,10 +430,19 @@ def main():
         except Exception:
             pass
 
+    # Language detection stats
+    lang_counts = {}
+    for dl in detected_languages:
+        lang_counts[dl] = lang_counts.get(dl, 0) + 1
+    lang_accuracy = None
+    if detected_languages:
+        matches = sum(1 for dl in detected_languages if dl.lower() == lang_canonical.lower())
+        lang_accuracy = round(matches / len(detected_languages), 4)
+
     metadata = {
         "model_path": args.model_path,
         "adapter_path": args.adapter_path,
-        "dataset_name": args.dataset_name,
+        "dataset_name": dataset_label,
         "dataset_hf_path": dataset_config.hf_path,
         "language": args.language,
         "language_canonical": lang_canonical,
@@ -368,6 +451,11 @@ def main():
         "num_errors": len(errors),
         "metric": metric_name,
         "score": score,
+        "language_detection": {
+            "expected": lang_canonical,
+            "accuracy": lang_accuracy,
+            "distribution": lang_counts,
+        },
         "elapsed_seconds": round(elapsed, 2),
         "dtype": args.dtype,
         "device": args.device,
@@ -394,8 +482,11 @@ def main():
 
     # Print summary
     score_str = f"{score:.4f}" if score is not None else "N/A"
+    lang_acc_str = f"{lang_accuracy:.1%}" if lang_accuracy is not None else "N/A"
     print(f"\nEvaluation complete.")
     print(f"  {metric_name}: {score_str}")
+    print(f"  Lang detection accuracy: {lang_acc_str} (expected: {lang_canonical})")
+    print(f"  Lang distribution: {lang_counts}")
     print(f"  Samples: {len(results)} | Errors: {len(errors)}")
     print(f"  Time: {elapsed:.1f}s")
     print(f"  Results: {out_dir}")
