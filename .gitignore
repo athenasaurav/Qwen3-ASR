@@ -22,3 +22,10 @@ wheels/
 .vscode/
 venv/
 env/
+.env
+
+# Evaluation results (large JSON files, generated reports)
+evaluation/results/
+
+# Fine-tuning runs (model checkpoints, adapter weights)
+finetuning/runs/

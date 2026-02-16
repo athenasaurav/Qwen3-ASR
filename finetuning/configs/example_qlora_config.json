@@ -1,0 +1,17 @@
+{
+  "model_path": "Qwen/Qwen3-ASR-1.7B",
+  "train_file": "/path/to/your/train.jsonl",
+  "output_dir": "./qwen3-asr-qlora-out",
+  "mode": "qlora",
+  "quantization_bits": 4,
+  "lora_r": 16,
+  "lora_alpha": 32,
+  "lora_dropout": 0.05,
+  "lora_target_modules": "q_proj,v_proj",
+  "batch_size": 8,
+  "grad_acc": 16,
+  "lr": 2e-4,
+  "epochs": 3,
+  "save_steps": 100,
+  "save_total_limit": 3
+}

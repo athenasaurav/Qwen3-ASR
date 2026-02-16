@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import argparse
+import json
 import os
 import re
 import shutil
@@ -23,6 +24,7 @@ from typing import Any, Dict, List, Optional
 import librosa
 import torch
 from datasets import load_dataset
+from dotenv import load_dotenv
 from qwen_asr import Qwen3ASRModel
 from transformers import (GenerationConfig, Trainer, TrainerCallback,
                           TrainingArguments)
@@ -185,8 +187,9 @@ def copy_required_hf_files_for_qwen_asr(src_dir: str, dst_dir: str):
 
 
 class MakeEveryCheckpointInferableCallback(TrainerCallback):
-    def __init__(self, base_model_path: str):
+    def __init__(self, base_model_path: str, mode: str = "sft"):
         self.base_model_path = base_model_path
+        self.mode = mode
 
     def on_save(self, args: TrainingArguments, state, control, **kwargs):
         if args.process_index != 0:
@@ -196,7 +199,18 @@ class MakeEveryCheckpointInferableCallback(TrainerCallback):
         if not os.path.isdir(ckpt_dir):
             ckpt_dir = kwargs.get("checkpoint", ckpt_dir)
 
-        copy_required_hf_files_for_qwen_asr(self.base_model_path, ckpt_dir)
+        if self.mode == "sft":
+            # Full checkpoint: copy HF config files so each checkpoint is inferable
+            copy_required_hf_files_for_qwen_asr(self.base_model_path, ckpt_dir)
+        else:
+            # LoRA/QLoRA: PEFT saves adapter weights automatically.
+            # Write metadata so we know which base model to load for inference.
+            meta = {"base_model_path": self.base_model_path, "mode": self.mode}
+            meta_path = os.path.join(ckpt_dir, "adapter_meta.json")
+            if not os.path.exists(meta_path):
+                with open(meta_path, "w") as f:
+                    json.dump(meta, f, indent=2)
+
         return control
 
 
@@ -236,26 +250,95 @@ def parse_args():
     p.add_argument("--resume_from", type=str, default="")
     p.add_argument("--resume", type=int, default=0)
 
+    # Fine-tuning mode
+    p.add_argument("--mode", type=str, default="sft",
+                   choices=["sft", "lora", "qlora"],
+                   help="Fine-tuning mode: sft (full params), lora, or qlora")
+
+    # LoRA parameters (used when mode=lora or mode=qlora)
+    p.add_argument("--lora_r", type=int, default=16,
+                   help="LoRA rank")
+    p.add_argument("--lora_alpha", type=int, default=32,
+                   help="LoRA alpha scaling factor")
+    p.add_argument("--lora_dropout", type=float, default=0.05,
+                   help="LoRA dropout rate")
+    p.add_argument("--lora_target_modules", type=str, default="q_proj,v_proj",
+                   help="Comma-separated target modules for LoRA")
+
+    # QLoRA quantization (used when mode=qlora)
+    p.add_argument("--quantization_bits", type=int, default=4,
+                   choices=[4, 8],
+                   help="Quantization bits for QLoRA (4 or 8)")
+
     return p.parse_args()
 
 
 def main():
     args_cli = parse_args()
 
+    # Load .env from project root
+    project_root = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+    load_dotenv(os.path.join(project_root, ".env"))
+
     if not args_cli.train_file:
         raise ValueError("TRAIN_FILE is required (json/jsonl). Needs fields: audio, text, optional prompt")
 
+    mode = args_cli.mode
+    print(f"Fine-tuning mode: {mode}")
+
     use_bf16 = torch.cuda.is_available() and torch.cuda.get_device_capability(0)[0] >= 8
-    asr_wrapper = Qwen3ASRModel.from_pretrained(
-        args_cli.model_path,
-        dtype=torch.bfloat16 if use_bf16 else torch.float16,
-        device_map=None,
-    )
+    compute_dtype = torch.bfloat16 if use_bf16 else torch.float16
+
+    # --- Model loading ---
+    if mode == "qlora":
+        from transformers import BitsAndBytesConfig
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=(args_cli.quantization_bits == 4),
+            load_in_8bit=(args_cli.quantization_bits == 8),
+            bnb_4bit_compute_dtype=compute_dtype,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type="nf4",
+        )
+        asr_wrapper = Qwen3ASRModel.from_pretrained(
+            args_cli.model_path,
+            torch_dtype=compute_dtype,
+            device_map={"": 0},
+            quantization_config=bnb_config,
+        )
+    else:
+        asr_wrapper = Qwen3ASRModel.from_pretrained(
+            args_cli.model_path,
+            dtype=compute_dtype,
+            device_map=None,
+        )
+
     model = asr_wrapper.model
     processor = asr_wrapper.processor
 
+    # Patch forward BEFORE wrapping with PEFT (PEFT preserves the patched forward)
     patch_outer_forward(model)
     model.generation_config = GenerationConfig.from_model_config(model.config)
+
+    # --- LoRA / QLoRA adapter setup ---
+    if mode in ("lora", "qlora"):
+        from peft import LoraConfig, TaskType, get_peft_model
+
+        if mode == "qlora":
+            from peft import prepare_model_for_kbit_training
+            model = prepare_model_for_kbit_training(model)
+
+        target_modules = [m.strip() for m in args_cli.lora_target_modules.split(",")]
+
+        lora_config = LoraConfig(
+            r=args_cli.lora_r,
+            lora_alpha=args_cli.lora_alpha,
+            lora_dropout=args_cli.lora_dropout,
+            target_modules=target_modules,
+            bias="none",
+            task_type=TaskType.CAUSAL_LM,
+        )
+        model = get_peft_model(model, lora_config)
+        model.print_trainable_parameters()
 
     raw_ds = load_dataset(
         "json",
@@ -296,6 +379,7 @@ def main():
         do_eval=bool(args_cli.eval_file),
         bf16=use_bf16,
         fp16=not use_bf16,
+        gradient_checkpointing=(mode == "qlora"),
         ddp_find_unused_parameters=False,
         remove_unused_columns=False,
         report_to="none",
@@ -308,7 +392,10 @@ def main():
         eval_dataset=ds.get("validation", None),
         data_collator=collator,
         tokenizer=processor.tokenizer,
-        callbacks=[MakeEveryCheckpointInferableCallback(base_model_path=args_cli.model_path)],
+        callbacks=[MakeEveryCheckpointInferableCallback(
+            base_model_path=args_cli.model_path,
+            mode=mode,
+        )],
     )
 
     resume_from = (args_cli.resume_from or "").strip()

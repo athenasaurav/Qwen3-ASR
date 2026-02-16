@@ -31,16 +31,23 @@ dependencies = [
   "gradio",
   "flask",
   "pytz",
+  "python-dotenv",
+  "tqdm",
+  "jiwer>=3.0.0",
 ]
 
 [project.optional-dependencies]
 vllm = [
   "vllm==0.14.0",
 ]
+finetune = [
+  "peft>=0.15.0",
+  "bitsandbytes>=0.45.0",
+]
 
 [project.urls]
-Homepage = "https://github.com/Qwen/Qwen3-ASR"
-Repository = "https://github.com/Qwen/Qwen3-ASR"
+Homepage = "https://github.com/athenasaurav/Qwen3-ASR"
+Repository = "https://github.com/athenasaurav/Qwen3-ASR"
 
 [project.scripts]
 qwen-asr-demo = "qwen_asr.cli.demo:main"

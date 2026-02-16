@@ -49,13 +49,14 @@ Language prefix recommendation:
 Note:
 - If you set `language None`, the model will not learn language detection from that prefix.
 
-### 3) Fine-tune (single GPU)
+### 3a) Full Fine-tune / SFT (single GPU)
 
 ```bash
 python qwen3_asr_sft.py \
   --model_path Qwen/Qwen3-ASR-1.7B \
   --train_file ./train.jsonl \
   --output_dir ./qwen3-asr-finetuning-out \
+  --mode sft \
   --batch_size 32 \
   --grad_acc 4 \
   --lr 2e-5 \
@@ -66,6 +67,52 @@ python qwen3_asr_sft.py \
 
 Checkpoints will be written to:
 - `./qwen3-asr-finetuning-out/checkpoint-<global_step>`
+
+### 3b) LoRA Fine-tune (single GPU)
+
+LoRA trains only low-rank adapter weights, keeping the base model frozen. Much faster and uses less VRAM.
+
+First install the required packages:
+```bash
+pip install -e ".[finetune]"
+```
+
+```bash
+python qwen3_asr_sft.py \
+  --model_path Qwen/Qwen3-ASR-1.7B \
+  --train_file ./train.jsonl \
+  --output_dir ./qwen3-asr-lora-out \
+  --mode lora \
+  --lora_r 16 \
+  --lora_alpha 32 \
+  --lora_dropout 0.05 \
+  --lora_target_modules q_proj,v_proj \
+  --batch_size 32 \
+  --grad_acc 4 \
+  --lr 1e-4 \
+  --epochs 3
+```
+
+LoRA checkpoints contain only adapter weights (`adapter_model.safetensors`, `adapter_config.json`) plus an `adapter_meta.json` recording the base model path.
+
+### 3c) QLoRA Fine-tune (single GPU, low VRAM)
+
+QLoRA loads the base model in 4-bit quantized form, enabling fine-tuning on consumer GPUs with limited VRAM.
+
+```bash
+python qwen3_asr_sft.py \
+  --model_path Qwen/Qwen3-ASR-1.7B \
+  --train_file ./train.jsonl \
+  --output_dir ./qwen3-asr-qlora-out \
+  --mode qlora \
+  --quantization_bits 4 \
+  --lora_r 16 \
+  --lora_alpha 32 \
+  --batch_size 8 \
+  --grad_acc 16 \
+  --lr 2e-4 \
+  --epochs 3
+```
 
 ### 4) Fine-tune (multi GPU with torchrun)
 
@@ -102,7 +149,7 @@ python qwen3_asr_sft.py \
   --resume 1
 ```
 
-### 6) Quick inference test
+### 6a) Quick inference test (SFT checkpoint)
 
 ```python
 import torch
@@ -115,6 +162,42 @@ model = Qwen3ASRModel.from_pretrained(
 )
 
 results = model.transcribe(
+    audio="https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen3-ASR-Repo/asr_en.wav",
+)
+
+print(results[0].language)
+print(results[0].text)
+```
+
+### 6b) Quick inference test (LoRA/QLoRA adapter)
+
+```python
+import torch
+from peft import PeftModel
+from transformers import AutoModel, AutoProcessor
+from qwen_asr import Qwen3ASRModel
+
+# Load base model
+base_model = AutoModel.from_pretrained(
+    "Qwen/Qwen3-ASR-1.7B",
+    torch_dtype=torch.bfloat16,
+    device_map="cuda:0",
+)
+
+# Load and merge LoRA adapter
+model = PeftModel.from_pretrained(base_model, "./qwen3-asr-lora-out/checkpoint-200")
+model = model.merge_and_unload()
+
+# Wrap in Qwen3ASRModel
+processor = AutoProcessor.from_pretrained("Qwen/Qwen3-ASR-1.7B", fix_mistral_regex=True)
+asr_model = Qwen3ASRModel(
+    backend="transformers",
+    model=model,
+    processor=processor,
+    max_inference_batch_size=32,
+)
+
+results = asr_model.transcribe(
     audio="https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen3-ASR-Repo/asr_en.wav",
 )
 
