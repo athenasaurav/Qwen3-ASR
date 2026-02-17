@@ -62,6 +62,32 @@ Your core responsibility is to manage all datasets used for both evaluation and 
 
 You are also responsible for developing scripts to preprocess datasets into the JSONL format required for fine-tuning: `{"audio": "path.wav", "text": "language English<asr_text>transcript"}`.
 
+For **single-dataset** preparation, use `finetuning/prepare_hf_dataset.py`. For **multi-dataset mixed** preparation, use recipes in `/finetuning/recipes/` with `finetuning/prepare_mixed_dataset.py` (see the `data-mixer` agent).
+
+## Agent: `data-mixer`
+
+**Role**: The `data-mixer` agent handles multi-dataset data preparation and mixing for fine-tuning.
+
+**Instructions**:
+
+Your primary function is to prepare mixed training datasets from multiple HuggingFace sources using recipe files. Recipe files are JSON configurations in `/finetuning/recipes/` that specify:
+
+- Multiple datasets with their HF paths, column mappings, and language labels
+- Per-dataset sampling limits (`max_samples`) and filters
+- Multi-config datasets (e.g., FLEURS with per-language configs)
+- Dialect-to-language mappings for multi-dialect datasets
+
+Workflow:
+
+1. **Read the recipe file** from `/finetuning/recipes/`. Validate all dataset entries have required fields (`name`, `hf_path`, `text_column`).
+2. **Execute `finetuning/prepare_mixed_dataset.py`** with `--recipe <path>`.
+3. **Verify output**: Check that `train.jsonl`, `eval.jsonl`, and `manifest.json` are created in the recipe's `output_dir`.
+4. **Report statistics**: Print per-dataset and per-language sample counts from `manifest.json`.
+
+The script downloads each dataset from HuggingFace, extracts audio as WAV files at the target sample rate, builds JSONL entries with `language {Name}<asr_text>{text}` format, combines all datasets into a single shuffled `train.jsonl`, and generates a manifest with statistics.
+
+> **Security Mandate**: Load all credentials from `.env`. Never hardcode tokens.
+
 ## Agent: `results-analyzer`
 
 **Role**: The `results-analyzer` agent is responsible for the analysis and summarization of evaluation results.

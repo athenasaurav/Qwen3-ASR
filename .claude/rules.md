@@ -33,3 +33,11 @@ This document defines a set of rules that are enforced based on file paths, usin
 **Description**: The core model implementation, located in this directory, is the heart of the Qwen3-ASR project. Modifications to these files can have far-reaching and unintended consequences.
 
 **Rule**: **NEVER** modify any file within this directory without obtaining explicit approval from the project owner. Any proposed changes must be accompanied by a thorough justification and a comprehensive testing plan.
+
+## Rule for Fine-tuning Recipes
+
+**Path**: `/finetuning/recipes/**/*.json`
+
+**Description**: Recipe files define multi-dataset mixing configurations for fine-tuning. They specify which datasets to use, column mappings, language labels, sampling parameters, and output directories. These files drive the `prepare_mixed_dataset.py` script.
+
+**Rule**: **ALWAYS** validate that all `hf_path` values are accessible and all column names match the actual dataset schema before executing data preparation. **NEVER** modify a recipe file during a data preparation run. Each new experiment should create a new recipe file (e.g., `arabic_mixed_v2.json`) rather than modifying an existing one.

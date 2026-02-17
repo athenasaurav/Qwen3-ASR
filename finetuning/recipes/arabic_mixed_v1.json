@@ -1,0 +1,104 @@
+{
+  "name": "arabic_mixed_v1",
+  "description": "Mixed Arabic (5 datasets) + FLEURS multilingual anchor (29 languages) for Qwen3-ASR LoRA fine-tuning. ~142K samples total, ~80% Arabic / ~20% multilingual.",
+  "target_sr": 16000,
+  "output_dir": "./finetuning/data/arabic_mixed_v1",
+  "datasets": [
+    {
+      "name": "masc",
+      "hf_path": "pain/MASC",
+      "text_column": "text",
+      "audio_column": "audio",
+      "splits": ["train"],
+      "language": "Arabic",
+      "max_samples": 50000,
+      "filter": {"type": "c"}
+    },
+    {
+      "name": "common_voice_arabic",
+      "hf_path": "MohamedRashad/common-voice-18-arabic",
+      "text_column": "sentence",
+      "audio_column": "audio",
+      "splits": ["train"],
+      "language": "Arabic",
+      "max_samples": 28000
+    },
+    {
+      "name": "mgb3",
+      "hf_path": "ArabicSpeech/MGB-3",
+      "text_column": "text",
+      "audio_column": "audio",
+      "splits": ["train"],
+      "language": "Arabic"
+    },
+    {
+      "name": "mgb5",
+      "hf_path": "ArabicSpeech/MGB-5",
+      "text_column": "text",
+      "audio_column": "audio",
+      "splits": ["train"],
+      "language": "Arabic",
+      "max_samples": 30000
+    },
+    {
+      "name": "sawtarabi",
+      "hf_path": "ArabicSpeech/sawtarabi",
+      "text_column": "text_not_diacritized",
+      "audio_column": "audio",
+      "splits": ["train", "validation"],
+      "dialect_column": "dialect",
+      "dialect_map": {
+        "MSA": "Arabic",
+        "EGY": "Arabic",
+        "CS_EGY_ENG": "Arabic",
+        "English": "English"
+      }
+    },
+    {
+      "name": "fleurs",
+      "hf_path": "google/fleurs",
+      "text_column": "transcription",
+      "audio_column": "audio",
+      "splits": ["train"],
+      "configs": [
+        "ar_eg", "de_de", "es_419", "fr_fr", "it_it",
+        "ja_jp", "ko_kr", "pt_br", "ru_ru", "zh_cn",
+        "yue_hant_hk", "hi_in", "id_id", "th_th", "vi_vn",
+        "tr_tr", "nl_nl", "pl_pl", "cs_cz", "da_dk",
+        "fi_fi", "sv_se", "ms_my", "hu_hu", "ro_ro",
+        "el_gr", "fa_ir", "mk_mk", "fil_ph"
+      ],
+      "config_to_language": {
+        "ar_eg": "Arabic",
+        "de_de": "German",
+        "es_419": "Spanish",
+        "fr_fr": "French",
+        "it_it": "Italian",
+        "ja_jp": "Japanese",
+        "ko_kr": "Korean",
+        "pt_br": "Portuguese",
+        "ru_ru": "Russian",
+        "zh_cn": "Chinese",
+        "yue_hant_hk": "Cantonese",
+        "hi_in": "Hindi",
+        "id_id": "Indonesian",
+        "th_th": "Thai",
+        "vi_vn": "Vietnamese",
+        "tr_tr": "Turkish",
+        "nl_nl": "Dutch",
+        "pl_pl": "Polish",
+        "cs_cz": "Czech",
+        "da_dk": "Danish",
+        "fi_fi": "Finnish",
+        "sv_se": "Swedish",
+        "ms_my": "Malay",
+        "hu_hu": "Hungarian",
+        "ro_ro": "Romanian",
+        "el_gr": "Greek",
+        "fa_ir": "Farsi",
+        "mk_mk": "Macedonian",
+        "fil_ph": "Filipino"
+      }
+    }
+  ]
+}
